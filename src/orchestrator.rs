@@ -1,9 +1,9 @@
 use anyhow::Result;
 use miow_analyzer::ContextAnalyzer;
-use miow_core::ProjectSignature;
-use miow_graph::KnowledgeGraph;
-use miow_llm::{ContextItem, GatheredContext, LLMProvider, Message, Role};
-use miow_agent::{GeminiRouterAgent, GeminiContextAuditor, GeminiWorkerAgent, RouterAgent, SearchPlan, WorkerAgent};
+use miow_agent::{AutonomousAgent, GeminiContextAuditor, GeminiRouterAgent, GeminiWorkerAgent, RouterAgent, SearchPlan, WorkerAgent};
+use miow_core::{IntelligentSignatureDetector, ProjectSignature};
+use miow_graph::{KnowledgeGraph, RelationshipInferencer};
+use miow_llm::{ContextItem, GatheredContext, LLMProvider, LLMResponse, Message, Role};
 use miow_prompt::{
     ConstantInfo, ContextData, DesignTokenInfo, PromptGenerator, PromptRequest, SchemaInfo,
     SymbolInfo, TypeInfo,
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Orchestrator that ties together all the components with LLM-powered context gathering
+#[allow(dead_code)]
 pub struct MiowOrchestrator {
     graph: Arc<KnowledgeGraph>,
     analyzer: ContextAnalyzer,
@@ -23,6 +24,7 @@ pub struct MiowOrchestrator {
     vector_store: Option<Arc<VectorStore>>,
 }
 
+#[allow(dead_code)]
 impl MiowOrchestrator {
     pub fn new(db_path: &str) -> Result<Self> {
         Ok(Self {
@@ -173,13 +175,12 @@ Respond with a JSON array of strings."#,
             refined_queries
         };
 
-        let keyword_pool = {
-            let refined = self.refine_keywords(&analyzed.keywords);
-            if refined.is_empty() {
-                vec![user_prompt.to_string()]
-            } else {
-                refined
-            }
+        // Step 3: Analyze intent and keywords
+        let _keyword_pool = {
+            let mut pool = HashSet::new();
+            pool.extend(analyzed.keywords.clone());
+            // technical_terms field does not exist in AnalyzedPrompt
+            pool
         };
 
         // Step 3: Gather comprehensive context using multiple search strategies
@@ -188,14 +189,14 @@ Respond with a JSON array of strings."#,
             .await?;
 
         // Step 4: Convert gathered context to prompt context format
-        let mut context_data = self
-            .convert_to_context_data(gathered_context, &keyword_pool, user_prompt)
+        let master_context = self
+            .convert_to_context_data(gathered_context, &[], "Master Context")
             .await?;
 
         // Step 5: Generate multi-step implementation plan using LLM
         let implementation_plan = if let Some(llm) = &self.llm {
             match self
-                .generate_implementation_plan(llm.as_ref(), user_prompt, &context_data, &intent_analysis)
+                .generate_implementation_plan(llm.as_ref(), user_prompt, &master_context, &intent_analysis)
                 .await
             {
                 Ok(plan) => plan,
@@ -204,18 +205,18 @@ Respond with a JSON array of strings."#,
                         "LLM implementation plan failed ({}). Falling back to basic plan.",
                         err
                     );
-                    self.generate_basic_implementation_plan(&context_data, &intent_analysis)
+                    self.generate_basic_implementation_plan(&master_context, &intent_analysis)
                 }
             }
         } else {
-            self.generate_basic_implementation_plan(&context_data, &intent_analysis)
+            self.generate_basic_implementation_plan(&master_context, &intent_analysis)
         };
 
         // Step 6: Generate the final comprehensive prompt
         let request = PromptRequest {
             original_prompt: user_prompt.to_string(),
             intent: intent_analysis,
-            context: context_data,
+            context: master_context,
             implementation_plan: Some(implementation_plan),
         };
 
@@ -288,10 +289,10 @@ Respond with a JSON array of strings."#,
         // PHASE 2: Generate Critical Questions (with detailed logging)
         info!("❓ Phase 3: Generating language-specific critical questions...");
         let critical_questions = if let Some(ref llm) = self.llm {
-            info!("💬 [LLM] Calling generate_critical_questions for language: {}, framework: {:?}", 
+            info!("💬 [LLM] Calling generate_critical_questions for language: {}, framework: {:?}",
                   project_language, framework);
             let start = std::time::Instant::now();
-            
+
             // Use LLM to generate questions
             match miow_llm::generate_critical_questions(
                 llm.as_ref(),
@@ -303,7 +304,7 @@ Respond with a JSON array of strings."#,
                     let duration = start.elapsed();
                     info!("✅ [LLM] Generated {} questions in {:?}", questions.len(), duration);
                     for (i, q) in questions.iter().enumerate() {
-                        info!("   Q{}: {} (type: {}, priority: {:?})", 
+                        info!("   Q{}: {} (type: {}, priority: {:?})",
                               i + 1, q.question, q.expected_type, q.priority);
                     }
                     questions
@@ -373,7 +374,7 @@ Respond with a JSON array of strings."#,
                     let duration = start.elapsed();
                     info!("✅ [QUESTION_LOOP] Completed in {:?} with {} answers", duration, answers.len());
                     for (i, answer) in answers.iter().enumerate() {
-                        info!("   Answer {}: {} symbols found, confidence: {:.2}", 
+                        info!("   Answer {}: {} symbols found, confidence: {:.2}",
                               i + 1, answer.symbols.len(), answer.confidence);
                         for symbol in &answer.symbols {
                             info!("      - {} ({}) from {}", symbol.name, symbol.kind, symbol.file_path);
@@ -431,6 +432,8 @@ Respond with a JSON array of strings."#,
                     content: chunk.content.clone(),
                     file_path: chunk.file_path.clone(),
                     relevance_score: worker_result.confidence,
+                    props: vec![],
+                    references: vec![],
                 };
 
                 // Categorize based on content type
@@ -455,6 +458,8 @@ Respond with a JSON array of strings."#,
                     content: symbol.content.clone(),
                     file_path: symbol.file_path.clone(),
                     relevance_score: answer.confidence,
+                    props: vec![],
+                    references: vec![],
                 };
 
                 // Add to appropriate category
@@ -514,7 +519,7 @@ Respond with a JSON array of strings."#,
         // 5. Deduplicate and Prune Context
         info!("✂️ Optimizing context...");
         miow_prompt::DeduplicationEngine::deduplicate(&mut context_data);
-        
+
         if let Some(budget) = config.token_budget {
             let pruner = miow_prompt::SmartPruner::new(budget);
             pruner.prune(&mut context_data);
@@ -533,6 +538,166 @@ Respond with a JSON array of strings."#,
         info!("✅ Universal Knowledge Graph workflow complete!");
 
         Ok(prompt)
+    }
+
+    /// Generate a context-aware prompt using the Autonomous Agent Loop
+    pub async fn generate_autonomous_prompt(
+        &self,
+        project_root: &str,
+        user_prompt: &str,
+        event_tx: Option<tokio::sync::mpsc::Sender<miow_agent::autonomous::AgentEvent>>,
+    ) -> Result<String> {
+        info!("🤖 Starting Autonomous Context Generation for: {}", project_root);
+
+        // 1. Detect Project Signature (LLM-driven)
+        let signature = self.detect_signature_with_llm(std::path::Path::new(project_root)).await?;
+        info!("📊 Detected Project Signature: {:?}", signature);
+
+        // 2. Initialize Autonomous Agent
+        let llm = self.llm.clone().ok_or_else(|| anyhow::anyhow!("LLM required for autonomous mode"))?;
+        let agent = AutonomousAgent::new(
+            llm,
+            self.graph.clone(),
+            self.vector_store.clone(),
+        );
+
+        // 3. Run Agent Loop (Gather Context)
+        let agent_context = agent.run(user_prompt, event_tx).await?;
+        info!("✅ Agent finished gathering context. Items: {}", agent_context.gathered_info.len());
+
+        // 4. Generate Implementation Plan (LLM-driven)
+        let plan = self.generate_implementation_plan_with_llm(
+            user_prompt,
+            &agent_context,
+            &signature.to_description()
+        ).await?;
+
+        // 5. Prepare Context Data for Meta-Prompt
+        let mut context_data = ContextData {
+            relevant_symbols: Vec::new(),
+            similar_symbols: Vec::new(),
+            types: Vec::new(),
+            design_tokens: Vec::new(),
+            constants: Vec::new(),
+            schemas: Vec::new(),
+            common_imports: Vec::new(),
+        };
+
+        // Add gathered info
+        for info in agent_context.gathered_info {
+            context_data.relevant_symbols.push(SymbolInfo {
+                name: "ContextItem".to_string(),
+                kind: "snippet".to_string(),
+                file_path: info.source,
+                content: info.content,
+                start_line: 0,
+                end_line: 0,
+                props: Vec::new(),
+                references: Vec::new(),
+            });
+        }
+
+        // Add the Plan as a special context item
+        context_data.relevant_symbols.push(SymbolInfo {
+            name: "ImplementationPlan".to_string(),
+            kind: "plan".to_string(),
+            file_path: "implementation_plan.md".to_string(),
+            content: plan,
+            start_line: 0,
+            end_line: 0,
+            props: Vec::new(),
+            references: Vec::new(),
+        });
+
+        let config = miow_prompt::MetaPromptConfig::default();
+        let prompt = miow_prompt::MetaPromptGenerator::generate(
+            user_prompt,
+            &context_data,
+            Some(&signature.to_description()),
+            config,
+        )?;
+
+        Ok(prompt)
+    }
+
+    async fn detect_signature_with_llm(&self, project_root: &std::path::Path) -> Result<miow_core::ProjectSignature> {
+        // List top-level files to give LLM a hint
+        let mut file_list = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(project_root) {
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    file_list.push(name);
+                }
+            }
+        }
+        let files_str = file_list.join(", ");
+
+        let prompt = format!(
+            r#"Analyze the following file list from a project root and determine the technology stack.
+            Files: {}
+
+            Respond with JSON ONLY:
+            {{
+                "language": "Rust/TypeScript/Python/etc",
+                "framework": "React/Axum/Django/etc",
+                "package_manager": "npm/cargo/pip/etc",
+                "ui_library": "Tailwind/MaterialUI/etc (or None)",
+                "validation_library": "zod/serde/etc (or None)",
+                "auth_library": "auth.js/etc (or None)",
+                "description": "Short description of the stack"
+            }}
+            "#,
+            files_str
+        );
+
+        let llm = self.llm.as_ref().ok_or_else(|| anyhow::anyhow!("LLM required"))?;
+        let response = llm.generate(&prompt).await?;
+
+        // Clean and parse JSON
+        let clean = response.content.trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let signature: miow_core::ProjectSignature = serde_json::from_str(clean)
+            .unwrap_or_else(|_| miow_core::ProjectSignature::default());
+
+        Ok(signature)
+    }
+
+    async fn generate_implementation_plan_with_llm(
+        &self,
+        task: &str,
+        context: &miow_agent::autonomous::AgentContext,
+        project_info: &str
+    ) -> Result<String> {
+        let gathered_summary = context.gathered_info.iter()
+            .map(|i| format!("- From {}: {}", i.source, i.relevance))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            r#"Create a comprehensive implementation plan for the following task.
+
+            Task: {}
+            Project Context: {}
+
+            Gathered Information:
+            {}
+
+            Generate a detailed Markdown plan with:
+            1. Goal Description
+            2. Proposed Changes (File by File)
+            3. Verification Plan
+            "#,
+            task, project_info, gathered_summary
+        );
+
+        let llm = self.llm.as_ref().ok_or_else(|| anyhow::anyhow!("LLM required"))?;
+        let response = llm.generate(&prompt).await?;
+
+        Ok(response.content)
     }
 
     /// Gather comprehensive context from codebase
@@ -591,12 +756,31 @@ Respond with a JSON array of strings."#,
                             0.7
                         };
 
+                        // Parse metadata for props
+                        let mut props = Vec::new();
+                        if let Some(meta_json) = &result.metadata {
+                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                                 if let Some(props_arr) = meta.get("props").and_then(|p| p.as_array()) {
+                                     for p in props_arr {
+                                         let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+                                         let type_ann = p.get("type_annotation").and_then(|s| s.as_str()).unwrap_or("any");
+                                         props.push(format!("{}: {}", name, type_ann));
+                                     }
+                                 }
+                            }
+                        }
+
+                        // Get references
+                        let references = self.graph.get_symbol_dependencies(result.id).unwrap_or_default();
+
                         let item = ContextItem {
                             name: result.name.clone(),
                             kind: result.kind.clone(),
                             content: result.content.clone(),
                             file_path: result.file_path.clone(),
                             relevance_score: relevance,
+                            props,
+                            references,
                         };
                         gathered.components.push(item);
                     }
@@ -628,12 +812,31 @@ Respond with a JSON array of strings."#,
                     relevance
                 };
 
+                // Parse metadata for props
+                let mut props = Vec::new();
+                if let Some(meta_json) = &result.metadata {
+                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                            if let Some(props_arr) = meta.get("props").and_then(|p| p.as_array()) {
+                                for p in props_arr {
+                                    let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+                                    let type_ann = p.get("type_annotation").and_then(|s| s.as_str()).unwrap_or("any");
+                                    props.push(format!("{}: {}", name, type_ann));
+                                }
+                            }
+                    }
+                }
+
+                // Get references
+                let references = self.graph.get_symbol_dependencies(result.id).unwrap_or_default();
+
                 let item = ContextItem {
                     name: result.name.clone(),
                     kind: result.kind.clone(),
                     content: result.content.clone(),
                     file_path: result.file_path.clone(),
                     relevance_score: relevance,
+                    props,
+                    references,
                 };
 
                 if kind_lower.contains("component")
@@ -646,11 +849,75 @@ Respond with a JSON array of strings."#,
                             .unwrap_or(false))
                 {
                     gathered.components.push(item);
-                } else if kind_lower.contains("function")
-                    || kind_lower.contains("helper")
-                    || kind_lower.contains("util")
-                {
+                } else if kind_lower.contains("type") || kind_lower.contains("interface") {
+                    gathered.types.push(item);
+                } else if kind_lower.contains("schema") || kind_lower.contains("model") {
+                    gathered.schemas.push(item);
+                } else if kind_lower.contains("const") {
+                    gathered.constants.push(item);
+                } else {
                     gathered.helpers.push(item);
+                }
+            }
+
+            // 2. Vector Search (Semantic)
+            if let Some(vs) = &self.vector_store {
+                if let Ok(vector_results) = vs.search_similar(query, 5).await {
+                    for result in vector_results {
+                        // Skip if we have target paths and this file doesn't match
+                        if !target_paths.is_empty()
+                            && !target_paths
+                                .iter()
+                                .any(|p| result.symbol.file_path.starts_with(p))
+                        {
+                            continue;
+                        }
+
+                        // Parse metadata for props
+                        let mut props = Vec::new();
+                        if !result.symbol.metadata.is_empty() {
+                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&result.symbol.metadata) {
+                                    if let Some(props_arr) = meta.get("props").and_then(|p| p.as_array()) {
+                                        for p in props_arr {
+                                            let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+                                            let type_ann = p.get("type_annotation").and_then(|s| s.as_str()).unwrap_or("any");
+                                            props.push(format!("{}: {}", name, type_ann));
+                                        }
+                                    }
+                            }
+                        }
+
+                        // Get references
+                        let references = if let Ok(id) = result.symbol.id.parse::<i64>() {
+                            self.graph.get_symbol_dependencies(id).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+
+                        let item = ContextItem {
+                            name: result.symbol.name.clone(),
+                            kind: result.symbol.kind.clone(),
+                            content: result.symbol.content.clone(),
+                            file_path: result.symbol.file_path.clone(),
+                            relevance_score: result.score,
+                            props,
+                            references,
+                        };
+
+                        let kind_lower = result.symbol.kind.to_lowercase();
+
+                        if kind_lower.contains("component") {
+                            gathered.components.push(item);
+                        } else if kind_lower.contains("type") || kind_lower.contains("interface") {
+                            gathered.types.push(item);
+                        } else if kind_lower.contains("schema") || kind_lower.contains("model") {
+                            gathered.schemas.push(item);
+                        } else if kind_lower.contains("const") {
+                            gathered.constants.push(item);
+                        } else {
+                            gathered.helpers.push(item);
+                        }
+                    }
                 }
             }
         }
@@ -663,8 +930,10 @@ Respond with a JSON array of strings."#,
                     name: comp.name,
                     kind: comp.kind,
                     content: comp.content,
-                    file_path: comp.file_path,
-                    relevance_score: 0.8,
+                    file_path: comp.file_path, // Kept original comp.file_path for syntactic correctness
+                    relevance_score: 1.0,
+                    props: vec![],
+                    references: vec![],
                 });
             }
         }
@@ -688,6 +957,8 @@ Respond with a JSON array of strings."#,
                     content: token.value.clone(),
                     file_path: token.file_path,
                     relevance_score: 0.7,
+                    props: vec![],
+                    references: vec![],
                 });
             }
         }
@@ -712,6 +983,8 @@ Respond with a JSON array of strings."#,
                             content: type_def.definition,
                             file_path: type_def.file_path,
                             relevance_score: 0.8,
+                            props: vec![],
+                            references: vec![],
                         });
                     }
                 }
@@ -739,6 +1012,8 @@ Respond with a JSON array of strings."#,
                             content: constant.value,
                             file_path: constant.file_path,
                             relevance_score: 0.6,
+                            props: vec![],
+                            references: vec![],
                         });
                     }
                 }
@@ -766,6 +1041,8 @@ Respond with a JSON array of strings."#,
                             content: schema.definition,
                             file_path: schema.file_path,
                             relevance_score: 0.7,
+                            props: vec![],
+                            references: vec![],
                         });
                     }
                 }
@@ -835,7 +1112,7 @@ Respond with a JSON array of strings."#,
         keywords: &[String],
         user_prompt: &str,
     ) -> Result<ContextData> {
-        let mut relevant_symbols: Vec<SymbolInfo> = gathered
+        let relevant_symbols: Vec<SymbolInfo> = gathered
             .components
             .iter()
             .chain(gathered.helpers.iter())
@@ -846,6 +1123,8 @@ Respond with a JSON array of strings."#,
                 file_path: item.file_path.clone(),
                 start_line: 0,
                 end_line: 0,
+                props: item.props.clone(),
+                references: item.references.clone(),
             })
             .collect();
 
@@ -859,6 +1138,8 @@ Respond with a JSON array of strings."#,
                 file_path: item.file_path.clone(),
                 start_line: 0,
                 end_line: 0,
+                props: item.props.clone(),
+                references: item.references.clone(),
             })
             .collect();
 
@@ -879,6 +1160,8 @@ Respond with a JSON array of strings."#,
                                 file_path: res.symbol.file_path,
                                 start_line: 0,
                                 end_line: 0,
+                                props: Vec::new(),
+                                references: Vec::new(),
                             },
                         ));
                     }
@@ -891,7 +1174,7 @@ Respond with a JSON array of strings."#,
 
         // Combine: Vector results FIRST (semantic), then text search as supplement
         let mut all_symbols: Vec<(f32, SymbolInfo)> = vector_symbols_with_scores;
-        
+
         // Add text search results with lower base score
         for symbol in relevant_symbols {
             let key = format!("{}::{}", symbol.file_path, symbol.name);
@@ -1049,7 +1332,7 @@ Respond with a JSON array of strings."#,
 
         let mut seen = HashSet::new();
         let mut ranked = Vec::new();
-        for (score, symbol) in scored {
+        for (_score, symbol) in scored {
             let key = format!("{}::{}", symbol.file_path, symbol.name);
             if seen.insert(key) {
                 ranked.push(symbol);
@@ -1339,12 +1622,12 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
     ) -> Vec<miow_agent::WorkerResult> {
         use miow_agent::{GeminiWorkerAgent, PromptRegistry};
         use futures::future::join_all;
-        
+
         let registry = Arc::new(PromptRegistry::new());
 
         // Create tasks for all workers
         let mut tasks = Vec::new();
-        
+
         for worker_id in &plan.execution_plan {
             if let Some(worker_plan) = plan.workers.iter().find(|w| w.worker_id == *worker_id) {
                 let worker_id_clone = worker_id.clone();
@@ -1353,13 +1636,13 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
                 let registry_clone = registry.clone();
                 let prompt_clone = user_prompt.to_string();
                 let sig_clone = project_signature.clone();
-                
+
                 info!("🔧 Queueing worker for parallel execution: {}", worker_id);
-                
+
                 let task = tokio::spawn(async move {
                     // Create a new worker agent for this task
                     let worker_agent = GeminiWorkerAgent::new(llm_clone.clone(), registry_clone);
-                    
+
                     let search_queries: Vec<miow_agent::SearchQuery> = worker_plan_clone.queries.iter()
                         .map(|q| miow_agent::SearchQuery {
                             query: q.query.clone(),
@@ -1370,7 +1653,7 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
 
                     info!("🚀 [WORKER {}] Starting execution...", worker_id_clone);
                     let start = std::time::Instant::now();
-                    
+
                     match worker_agent.execute(
                         &worker_plan_clone.worker_id,
                         &prompt_clone,
@@ -1390,7 +1673,7 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
                         }
                     }
                 });
-                
+
                 tasks.push(task);
             }
         }
@@ -1398,7 +1681,7 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
         // Execute all workers in parallel (with concurrency limit via join_all)
         info!("🔄 Executing {} workers in parallel...", tasks.len());
         let results: Vec<_> = join_all(tasks).await;
-        
+
         // Collect successful results, maintaining order
         let mut worker_results = Vec::new();
         for result in results {
@@ -1406,10 +1689,10 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
                 worker_results.push(worker_result);
             }
         }
-        
-        info!("✅ Parallel worker execution complete: {}/{} succeeded", 
+
+        info!("✅ Parallel worker execution complete: {}/{} succeeded",
               worker_results.len(), plan.execution_plan.len());
-        
+
         worker_results
     }
 
@@ -1474,7 +1757,7 @@ Format the plan as a numbered list with clear steps. Be specific about what to r
         &self,
         llm: Arc<dyn miow_llm::LLMProvider>,
         worker_results: &[miow_agent::WorkerResult],
-        base_context: &miow_llm::GatheredContext,
+        _base_context: &miow_llm::GatheredContext, // Marked as unused
         user_prompt: &str,
         project_signature: &miow_core::ProjectSignature,
     ) -> Result<miow_llm::GatheredContext> {
@@ -1521,7 +1804,7 @@ Respond with JSON containing prioritized context items from all workers."#,
 
         // For now, return the base context enhanced with worker results
         // In a full implementation, parse the LLM response to selectively include items
-        Ok(self.merge_contexts_rule_based(worker_results, base_context))
+        Ok(self.merge_contexts_rule_based(worker_results, _base_context))
     }
 
     /// Rule-based context merging (fallback when LLM fails)
@@ -1561,6 +1844,8 @@ Respond with JSON containing prioritized context items from all workers."#,
                         content: chunk.content.clone(),
                         file_path: chunk.file_path.clone(),
                         relevance_score: worker_result.confidence,
+                        props: Vec::new(),
+                        references: Vec::new(),
                     };
 
                     // Categorize based on content type
@@ -1581,11 +1866,12 @@ Respond with JSON containing prioritized context items from all workers."#,
     }
 
     // Enhanced context gathering with smart selection
+    #[allow(unused_variables)] // Allow unused variables for now, as the implementation is a placeholder
     async fn gather_smart_context(
-        &self, 
-        user_prompt: &str, 
-        symbols: Vec<SymbolInfo>, 
-        questions: &[String]
+        &self,
+        user_prompt: &str,
+        intent: &str,
+        router_plan: Option<&miow_agent::SearchPlan>,
     ) -> Result<ContextData> {
         info!("Gathering smart context with LLM selection");
 
@@ -1603,7 +1889,10 @@ Respond with JSON containing prioritized context items from all workers."#,
                 file_path: item.file_path.clone(),
                 start_line: 0,
                 end_line: 0,
-            }).collect(),
+                props: item.props.clone(),
+                references: item.references.clone(),
+            })
+            .collect(),
             similar_symbols: raw_context.helpers.iter().map(|item| SymbolInfo {
                 name: item.name.clone(),
                 kind: item.kind.clone(),
@@ -1611,7 +1900,10 @@ Respond with JSON containing prioritized context items from all workers."#,
                 file_path: item.file_path.clone(),
                 start_line: 0,
                 end_line: 0,
-            }).collect(),
+                props: item.props.clone(),
+                references: item.references.clone(),
+            })
+            .collect(),
             types: raw_context.types.iter().map(|item| TypeInfo {
                 name: item.name.clone(),
                 kind: item.kind.clone(),
@@ -1843,7 +2135,7 @@ Respond with JSON containing prioritized context items from all workers."#,
         info!("📁 Getting relevant files for prompt: {}", user_prompt);
         
         // Detect project signature
-        let project_signature = self.load_or_detect_signature(project_root)?;
+        let _project_signature = self.load_or_detect_signature(project_root)?;
         
         // Analyze prompt
         let analyzed = self.analyzer.analyze_prompt(user_prompt);
@@ -1904,6 +2196,23 @@ Respond with JSON containing prioritized context items from all workers."#,
         for file_path in selected_files {
             if let Ok(symbols) = self.graph.get_file_symbols(file_path) {
                 for symbol in symbols {
+                    // Parse metadata for props
+                    let mut props = Vec::new();
+                    if let Some(meta_json) = &symbol.metadata {
+                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                             if let Some(props_arr) = meta.get("props").and_then(|p| p.as_array()) {
+                                 for p in props_arr {
+                                     let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+                                     let type_ann = p.get("type_annotation").and_then(|s| s.as_str()).unwrap_or("any");
+                                     props.push(format!("{}: {}", name, type_ann));
+                                 }
+                             }
+                        }
+                    }
+
+                    // Get references
+                    let references = self.graph.get_symbol_dependencies(symbol.id).unwrap_or_default();
+
                     selected_symbols.push(SymbolInfo {
                         name: symbol.name,
                         kind: symbol.kind,
@@ -1911,6 +2220,8 @@ Respond with JSON containing prioritized context items from all workers."#,
                         file_path: symbol.file_path,
                         start_line: symbol.start_line as i64,
                         end_line: symbol.end_line as i64,
+                        props,
+                        references,
                     });
                 }
             }
@@ -1948,5 +2259,41 @@ Respond with JSON containing prioritized context items from all workers."#,
         
         info!("✅ Generated prompt with selected files");
         Ok(prompt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_gather_comprehensive_context_structure() {
+        // This test verifies that the method exists and compiles
+        // We can't easily mock the vector store without refactoring,
+        // but we can verify the graph search path works.
+        
+        let temp_dir = std::env::temp_dir().join("miow_test_orchestrator");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("test.db");
+        
+        // Clean up previous run
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+
+        let orchestrator = MiowOrchestrator::new(db_path.to_str().unwrap())
+            .expect("Failed to create orchestrator");
+
+        // Should return empty result but not panic
+        let result = orchestrator.gather_comprehensive_context(
+            "test prompt",
+            &["query".to_string()],
+            "test_intent",
+            None
+        ).await;
+
+        assert!(result.is_ok());
+        let context = result.unwrap();
+        assert!(context.components.is_empty());
     }
 }

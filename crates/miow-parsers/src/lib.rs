@@ -6,12 +6,16 @@ pub mod rust;
 pub mod types;
 pub mod typescript;
 pub mod style_analyzer;
+pub mod semantic;
+pub mod pattern_discovery;
 
 pub use python::PythonParser;
 pub use rust::RustParser;
 pub use types::*;
 pub use typescript::TypeScriptParser;
 pub use style_analyzer::{StyleAnalyzer, StyleAnalysis};
+pub use semantic::{SemanticAnalyzer, SemanticInfo, BestPractice, ComplianceStatus};
+pub use pattern_discovery::{PatternDiscovery, DiscoveredPattern};
 
 /// Parse a TypeScript/TSX file and extract symbols
 pub fn parse_typescript(content: &str, is_tsx: bool) -> Result<ParsedFile> {

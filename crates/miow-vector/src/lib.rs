@@ -4,6 +4,14 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+pub mod file_watcher;
+pub mod hybrid_search;
+pub mod smart_chunking;
+
+pub use file_watcher::FileWatcher;
+pub use hybrid_search::{HybridSearch, HybridSearchConfig};
+pub use smart_chunking::{SmartChunker, ChunkingStrategy, CodeChunk};
+
 /// Vector store for semantic search using Qdrant
 pub struct VectorStore {
     qdrant_url: String,

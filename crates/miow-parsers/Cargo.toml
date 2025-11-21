@@ -14,3 +14,5 @@ tree-sitter-rust = "0.20"
 tree-sitter-python = "0.20"
 tracing = { workspace = true }
 miow-llm = { path = "../miow-llm" }
+regex = "1.10"
+walkdir = { workspace = true }

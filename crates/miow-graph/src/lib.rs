@@ -5,9 +5,15 @@ use std::path::Path;
 
 pub mod query;
 pub mod schema;
+pub mod semantic_search;
+pub mod relationship_inference;
+pub mod query_expansion;
 
 pub use query::*;
 pub use schema::*;
+pub use semantic_search::{SemanticGraphSearch, SemanticSearchResult};
+pub use relationship_inference::{RelationshipInferencer, InferredRelationship, RelationshipType};
+pub use query_expansion::{QueryExpander, ExpandedQuery};
 
 use std::sync::Mutex;
 
@@ -284,7 +290,7 @@ impl KnowledgeGraph {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line
+            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line, s.metadata
             FROM symbols s
             JOIN files f ON s.file_id = f.id
             WHERE s.name LIKE ?1
@@ -303,6 +309,7 @@ impl KnowledgeGraph {
                 file_path: row.get(4)?,
                 start_line: row.get(5)?,
                 end_line: row.get(6)?,
+                metadata: row.get(7)?,
             })
         })?;
 
@@ -318,7 +325,7 @@ impl KnowledgeGraph {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line
+            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line, s.metadata
             FROM symbols s
             JOIN files f ON s.file_id = f.id
             WHERE s.name = ?1
@@ -334,6 +341,7 @@ impl KnowledgeGraph {
                 file_path: row.get(4)?,
                 start_line: row.get(5)?,
                 end_line: row.get(6)?,
+                metadata: row.get(7)?,
             })
         })?;
 
@@ -349,7 +357,7 @@ impl KnowledgeGraph {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line
+            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line, s.metadata
             FROM symbols s
             JOIN files f ON s.file_id = f.id
             WHERE s.kind = ?1
@@ -366,6 +374,7 @@ impl KnowledgeGraph {
                 file_path: row.get(4)?,
                 start_line: row.get(5)?,
                 end_line: row.get(6)?,
+                metadata: row.get(7)?,
             })
         })?;
 
@@ -411,7 +420,7 @@ impl KnowledgeGraph {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT DISTINCT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line
+            SELECT DISTINCT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line, s.metadata
             FROM symbols s
             JOIN files f ON s.file_id = f.id
             JOIN symbol_references r ON r.from_symbol_id = s.id
@@ -428,6 +437,7 @@ impl KnowledgeGraph {
                 file_path: row.get(4)?,
                 start_line: row.get(5)?,
                 end_line: row.get(6)?,
+                metadata: row.get(7)?,
             })
         })?;
 
@@ -438,12 +448,28 @@ impl KnowledgeGraph {
         Ok(symbols)
     }
 
+    /// Get names of symbols referenced by a given symbol
+    pub fn get_symbol_dependencies(&self, symbol_id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT to_symbol_name FROM symbol_references WHERE from_symbol_id = ?1"
+        )?;
+        
+        let rows = stmt.query_map(params![symbol_id], |row| row.get(0))?;
+        
+        let mut refs = Vec::new();
+        for row in rows {
+            refs.push(row?);
+        }
+        Ok(refs)
+    }
+
     /// Get all symbols in a file
     pub fn get_file_symbols(&self, file_path: &str) -> Result<Vec<SymbolSearchResult>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line
+            SELECT s.id, s.name, s.kind, s.content, f.path, s.start_line, s.end_line, s.metadata
             FROM symbols s
             JOIN files f ON s.file_id = f.id
             WHERE f.path = ?1
@@ -460,6 +486,7 @@ impl KnowledgeGraph {
                 file_path: row.get(4)?,
                 start_line: row.get(5)?,
                 end_line: row.get(6)?,
+                metadata: row.get(7)?,
             })
         })?;
 
@@ -595,6 +622,7 @@ pub struct SymbolSearchResult {
     pub file_path: String,
     pub start_line: i64,
     pub end_line: i64,
+    pub metadata: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -265,6 +265,10 @@ pub struct SymbolInfo {
     pub file_path: String,
     pub start_line: i64,
     pub end_line: i64,
+    #[serde(default)]
+    pub props: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

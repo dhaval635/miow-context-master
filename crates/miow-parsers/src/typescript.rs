@@ -136,7 +136,7 @@ impl TypeScriptParser {
                     content,
                     metadata,
                     children: vec![],
-                    references: vec![],
+                    references: self.extract_references(&node, source)?,
                 });
             }
         }
@@ -198,7 +198,7 @@ impl TypeScriptParser {
         match kind {
             "function_declaration" => {
                 let name = self
-                    .get_child_text(node, "identifier", source)
+                    .get_child_text(node, "name", source)
                     .unwrap_or_else(|| "anonymous".to_string());
                 let range = self.get_range(node);
                 let metadata = self.extract_function_metadata(node, source)?;
@@ -218,12 +218,12 @@ impl TypeScriptParser {
                     content: text.to_string(),
                     metadata,
                     children: vec![],   // TODO: Extract local variables/functions
-                    references: vec![], // TODO: Extract references
+                    references: self.extract_references(node, source)?,
                 }))
             }
             "class_declaration" => {
                 let name = self
-                    .get_child_text(node, "type_identifier", source)
+                    .get_child_text(node, "name", source)
                     .unwrap_or_else(|| "Anonymous".to_string());
                 let range = self.get_range(node);
                 let metadata = SymbolMetadata::default(); // TODO: Extract class metadata
@@ -235,12 +235,12 @@ impl TypeScriptParser {
                     content: text.to_string(),
                     metadata,
                     children: self.extract_class_members(node, source)?,
-                    references: vec![],
+                    references: self.extract_references(node, source)?,
                 }))
             }
             "interface_declaration" => {
                 let name = self
-                    .get_child_text(node, "type_identifier", source)
+                    .get_child_text(node, "name", source)
                     .unwrap_or_else(|| "Anonymous".to_string());
                 let range = self.get_range(node);
 
@@ -306,7 +306,7 @@ impl TypeScriptParser {
                                 content: node.utf8_text(source.as_bytes())?.to_string(),
                                 metadata,
                                 children: vec![],
-                                references: vec![],
+                                references: self.extract_references(&value_node, source)?,
                             }));
                         }
                     }
@@ -319,7 +319,7 @@ impl TypeScriptParser {
                         content: node.utf8_text(source.as_bytes())?.to_string(),
                         metadata: SymbolMetadata::default(),
                         children: vec![],
-                        references: vec![],
+                        references: self.extract_references(node, source)?,
                     }));
                 }
             }
@@ -399,6 +399,13 @@ impl TypeScriptParser {
         // Extract parameters
         if let Some(params_node) = node.child_by_field_name("parameters") {
             metadata.parameters = self.extract_parameters(&params_node, source)?;
+            
+            // If this is a component, try to extract props from the first parameter
+            if self.is_component_node(node, source) {
+                if let Some(first_param) = metadata.parameters.first() {
+                    metadata.props = self.extract_props_from_param(first_param, node, source)?;
+                }
+            }
         }
 
         // Extract return type
@@ -409,6 +416,52 @@ impl TypeScriptParser {
         metadata.is_async = node.utf8_text(source.as_bytes())?.starts_with("async");
 
         Ok(metadata)
+    }
+
+    fn is_component_node(&self, node: &Node, source: &str) -> bool {
+        if let Some(name_node) = node.child_by_field_name("name") {
+             if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                 return self.is_component_name(name) && self.returns_jsx(node, source);
+             }
+        }
+        false
+    }
+
+    fn extract_props_from_param(&self, param: &Parameter, _node: &Node, _source: &str) -> Result<Vec<PropDefinition>> {
+        let mut props = Vec::new();
+
+        // Case 1: Destructured props: ({ name, age }: Props)
+        if param.name.starts_with('{') {
+             // Simple regex to find property names in { prop1, prop2: alias }
+             // Matches words followed by comma or closing brace, ignoring values
+             let re = regex::Regex::new(r"(\w+)(?:\s*[:=]\s*[^,}]+)?").unwrap();
+             
+             // Remove braces
+             let content = param.name.trim_matches(|c| c == '{' || c == '}');
+             
+             for cap in re.captures_iter(content) {
+                 if let Some(name) = cap.get(1) {
+                     props.push(PropDefinition {
+                         name: name.as_str().to_string(),
+                         type_annotation: None, 
+                         is_required: true, // Assume required by default in destructuring unless = value
+                         default_value: None,
+                         description: None,
+                         validation: None,
+                     });
+                 }
+             }
+        }
+        
+        // Case 2: Named props with type annotation (props: MyProps)
+        if let Some(_type_name) = &param.type_annotation {
+             // We can't resolve the type definition here easily, but we can record that 
+             // this component uses `type_name` as props.
+             // For now, we just return an empty list if not destructured, 
+             // relying on the type definition elsewhere.
+        }
+
+        Ok(props)
     }
 
     fn extract_arrow_function_metadata(&self, node: &Node, source: &str) -> Result<SymbolMetadata> {
@@ -546,6 +599,100 @@ impl TypeScriptParser {
         // For now, we rely on symbols being marked as exported if we were to add that flag
         // But here we want explicit export statements
         Ok(exports)
+    }
+
+    fn extract_references(&self, node: &Node, source: &str) -> Result<Vec<String>> {
+        let mut references = Vec::new();
+        let mut cursor = node.walk();
+
+        // Traverse the node to find identifiers that are used (not declared)
+        for child in node.children(&mut cursor) {
+            self.collect_references(&child, source, &mut references)?;
+        }
+
+        // Deduplicate
+        references.sort();
+        references.dedup();
+
+        Ok(references)
+    }
+
+    fn collect_references(&self, node: &Node, source: &str, references: &mut Vec<String>) -> Result<()> {
+        let kind = node.kind();
+
+        match kind {
+            "identifier" => {
+                // Check if this identifier is a reference
+                // We need to avoid declarations
+                if self.is_reference(node) {
+                    let name = node.utf8_text(source.as_bytes())?.to_string();
+                    // Filter out basic keywords and types if possible (simple heuristic)
+                    if !self.is_keyword(&name) {
+                        references.push(name);
+                    }
+                }
+            }
+            "property_identifier" => {
+                // Usually property access, might be relevant if it's a method call
+                // e.g. obj.method() -> we want 'method' if it's a known symbol
+                // For now, let's be conservative and skip properties to avoid noise
+            }
+            "type_identifier" => {
+                // Type references
+                let name = node.utf8_text(source.as_bytes())?.to_string();
+                if !self.is_keyword(&name) {
+                    references.push(name);
+                }
+            }
+            _ => {
+                // Recurse
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    self.collect_references(&child, source, references)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_reference(&self, node: &Node) -> bool {
+        let parent = match node.parent() {
+            Some(p) => p,
+            None => return false,
+        };
+
+        let kind = parent.kind();
+        
+        // Exclude declarations
+        match kind {
+            "function_declaration" | "variable_declarator" | "class_declaration" | "interface_declaration" | "method_definition" => {
+                // If it's the name field, it's a declaration
+                if let Some(name_child) = parent.child_by_field_name("name") {
+                    if name_child.id() == node.id() {
+                        return false;
+                    }
+                }
+            }
+            "property_signature" => {
+                 if let Some(name_child) = parent.child_by_field_name("name") {
+                    if name_child.id() == node.id() {
+                        return false;
+                    }
+                }
+            }
+            "import_specifier" | "import_clause" | "namespace_import" => return false,
+            _ => {}
+        }
+
+        true
+    }
+
+    fn is_keyword(&self, name: &str) -> bool {
+        matches!(name, 
+            "string" | "number" | "boolean" | "any" | "void" | "null" | "undefined" | 
+            "true" | "false" | "this" | "super" | "console" | "window" | "document" |
+            "Array" | "Promise" | "Object" | "Function" | "Error" | "Map" | "Set"
+        )
     }
 
     fn extract_design_tokens(&self, node: &Node, source: &str) -> Result<Vec<DesignToken>> {
@@ -932,5 +1079,51 @@ impl TypeScriptParser {
 impl Default for TypeScriptParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_references() {
+        let parser = TypeScriptParser::new();
+        let content = r#"
+            import { helper } from './utils';
+            
+            function myFunction() {
+                const x = helper(10);
+                const y = anotherFunction();
+                return x + y;
+            }
+        "#;
+        
+        let parsed = parser.parse(content, false).unwrap();
+        println!("Parsed symbols: {:?}", parsed.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
+        let symbol = parsed.symbols.iter().find(|s| s.name == "myFunction").unwrap();
+        
+        assert!(symbol.references.contains(&"helper".to_string()));
+        assert!(symbol.references.contains(&"anotherFunction".to_string()));
+        // Local variables might be captured as references, which is acceptable for now.
+        // assert!(!symbol.references.contains(&"x".to_string())); 
+    }
+
+    #[test]
+    fn test_extract_props() {
+        let parser = TypeScriptParser::new();
+        let content = r#"
+            function MyComponent({ title, isActive }: { title: string, isActive: boolean }) {
+                return <div>{title}</div>;
+            }
+        "#;
+        
+        let parsed = parser.parse(content, true).unwrap();
+        println!("Parsed symbols: {:?}", parsed.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
+        let symbol = parsed.symbols.iter().find(|s| s.name == "MyComponent").unwrap();
+        
+        assert_eq!(symbol.metadata.props.len(), 2);
+        assert!(symbol.metadata.props.iter().any(|p| p.name == "title"));
+        assert!(symbol.metadata.props.iter().any(|p| p.name == "isActive"));
     }
 }

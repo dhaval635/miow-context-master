@@ -30,15 +30,17 @@ impl RustParser {
 
         let symbols = self.extract_symbols(&root_node, content)?;
         let imports = self.extract_imports(&root_node, content)?;
+        let type_definitions = self.extract_type_definitions(&root_node, content)?;
+        let constants = self.extract_constants(&root_node, content)?;
 
         Ok(ParsedFile {
             symbols,
             imports,
             exports: vec![], // Rust exports are usually pub, handled in symbols
             design_tokens: vec![],
-            type_definitions: vec![], // TODO: Extract type definitions
-            constants: vec![],        // TODO: Extract constants
-            schemas: vec![],          // TODO: Extract validation schemas
+            type_definitions,
+            constants,
+            schemas: vec![],          // Rust doesn't have runtime validation schemas like Zod
             language: "rust".to_string(),
         })
     }
@@ -163,6 +165,85 @@ impl RustParser {
                     content: text.to_string(),
                     metadata: SymbolMetadata::default(),
                     children: vec![], // Could recurse if inline mod
+                    references: vec![],
+                }))
+            }
+            "trait_item" => {
+                let name = self
+                    .get_child_text(node, "type_identifier", source)
+                    .unwrap_or_else(|| "Anonymous".to_string());
+                let range = self.get_range(node);
+                let mut metadata = self.extract_metadata(node, source)?;
+                
+                // Extract generic parameters
+                if let Some(type_params) = node.child_by_field_name("type_parameters") {
+                    metadata.generic_params = self.extract_generic_params(&type_params, source)?;
+                }
+
+                Ok(Some(Symbol {
+                    name,
+                    kind: SymbolType::Interface, // Traits are similar to interfaces
+                    range,
+                    content: text.to_string(),
+                    metadata,
+                    children: self.extract_trait_members(node, source)?,
+                    references: vec![],
+                }))
+            }
+            "type_item" => {
+                // Type alias: type MyType = SomeType;
+                let name = self
+                    .get_child_text(node, "type_identifier", source)
+                    .unwrap_or_else(|| "Anonymous".to_string());
+                Ok(Some(Symbol {
+                    name,
+                    kind: SymbolType::TypeParameter,
+                    range: self.get_range(node),
+                    content: text.to_string(),
+                    metadata: SymbolMetadata::default(),
+                    children: vec![],
+                    references: vec![],
+                }))
+            }
+            "const_item" => {
+                let name = self
+                    .get_child_text(node, "identifier", source)
+                    .unwrap_or_else(|| "CONST".to_string());
+                let mut metadata = self.extract_metadata(node, source)?;
+                
+                // Extract type
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    metadata.return_type = Some(type_node.utf8_text(source.as_bytes())?.to_string());
+                }
+                
+                Ok(Some(Symbol {
+                    name,
+                    kind: SymbolType::Constant,
+                    range: self.get_range(node),
+                    content: text.to_string(),
+                    metadata,
+                    children: vec![],
+                    references: vec![],
+                }))
+            }
+            "static_item" => {
+                let name = self
+                    .get_child_text(node, "identifier", source)
+                    .unwrap_or_else(|| "STATIC".to_string());
+                let mut metadata = self.extract_metadata(node, source)?;
+                metadata.is_static = true;
+                
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    metadata.return_type = Some(type_node.utf8_text(source.as_bytes())?.to_string());
+                }
+                
+                Ok(Some(Symbol {
+                    name,
+                    kind: SymbolType::Variable,
+                    range: self.get_range(node),
+                    content: text.to_string(),
+                    metadata,
+                    children: vec![],
                     references: vec![],
                 }))
             }
@@ -351,6 +432,324 @@ impl RustParser {
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
         }
+    }
+
+    fn extract_trait_members(&self, node: &Node, source: &str) -> Result<Vec<Symbol>> {
+        let mut members = Vec::new();
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.children(&mut cursor) {
+                match child.kind() {
+                    "function_signature_item" => {
+                        let name = self
+                            .get_child_text(&child, "name", source)
+                            .unwrap_or_else(|| "fn".to_string());
+                        let metadata = self.extract_function_metadata(&child, source)?;
+
+                        members.push(Symbol {
+                            name,
+                            kind: SymbolType::Method,
+                            range: self.get_range(&child),
+                            content: child.utf8_text(source.as_bytes())?.to_string(),
+                            metadata,
+                            children: vec![],
+                            references: vec![],
+                        });
+                    }
+                    "associated_type" => {
+                        let name = self
+                            .get_child_text(&child, "type_identifier", source)
+                            .unwrap_or_else(|| "AssociatedType".to_string());
+                        
+                        members.push(Symbol {
+                            name,
+                            kind: SymbolType::TypeParameter,
+                            range: self.get_range(&child),
+                            content: child.utf8_text(source.as_bytes())?.to_string(),
+                            metadata: SymbolMetadata::default(),
+                            children: vec![],
+                            references: vec![],
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(members)
+    }
+
+    fn extract_generic_params(&self, node: &Node, source: &str) -> Result<Vec<String>> {
+        let mut params = Vec::new();
+        let mut cursor = node.walk();
+
+        for child in node.children(&mut cursor) {
+            if child.kind() == "type_identifier" || child.kind() == "lifetime" {
+                params.push(child.utf8_text(source.as_bytes())?.to_string());
+            }
+        }
+
+        Ok(params)
+    }
+
+    fn extract_type_definitions(&self, node: &Node, source: &str) -> Result<Vec<TypeDefinition>> {
+        let mut type_defs = Vec::new();
+        let mut cursor = node.walk();
+
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "struct_item" => {
+                    if let Some(type_def) = self.extract_struct_type_def(&child, source)? {
+                        type_defs.push(type_def);
+                    }
+                }
+                "enum_item" => {
+                    if let Some(type_def) = self.extract_enum_type_def(&child, source)? {
+                        type_defs.push(type_def);
+                    }
+                }
+                "type_item" => {
+                    if let Some(type_def) = self.extract_type_alias(&child, source)? {
+                        type_defs.push(type_def);
+                    }
+                }
+                "trait_item" => {
+                    if let Some(type_def) = self.extract_trait_type_def(&child, source)? {
+                        type_defs.push(type_def);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(type_defs)
+    }
+
+    fn extract_struct_type_def(&self, node: &Node, source: &str) -> Result<Option<TypeDefinition>> {
+        let name = self
+            .get_child_text(node, "type_identifier", source)
+            .unwrap_or_else(|| "Anonymous".to_string());
+        
+        let mut properties = Vec::new();
+        let mut generic_params = Vec::new();
+
+        // Extract generic parameters
+        if let Some(type_params) = node.child_by_field_name("type_parameters") {
+            generic_params = self.extract_generic_params(&type_params, source)?;
+        }
+
+        // Extract fields
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.children(&mut cursor) {
+                if child.kind() == "field_declaration" {
+                    let field_name = self
+                        .get_child_text(&child, "name", source)
+                        .unwrap_or_else(|| "field".to_string());
+                    let type_annotation = child
+                        .child_by_field_name("type")
+                        .map(|n| n.utf8_text(source.as_bytes()).unwrap().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    properties.push(TypeProperty {
+                        name: field_name,
+                        type_annotation,
+                        is_optional: false, // Rust doesn't have optional fields in the same way
+                        description: None,
+                    });
+                }
+            }
+        }
+
+        Ok(Some(TypeDefinition {
+            name,
+            kind: TypeKind::Interface, // Structs are like interfaces
+            definition: node.utf8_text(source.as_bytes())?.to_string(),
+            properties,
+            generic_params,
+            range: self.get_range(node),
+        }))
+    }
+
+    fn extract_enum_type_def(&self, node: &Node, source: &str) -> Result<Option<TypeDefinition>> {
+        let name = self
+            .get_child_text(node, "type_identifier", source)
+            .unwrap_or_else(|| "Anonymous".to_string());
+        
+        let mut properties = Vec::new();
+        let mut generic_params = Vec::new();
+
+        // Extract generic parameters
+        if let Some(type_params) = node.child_by_field_name("type_parameters") {
+            generic_params = self.extract_generic_params(&type_params, source)?;
+        }
+
+        // Extract variants
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.children(&mut cursor) {
+                if child.kind() == "enum_variant" {
+                    let variant_name = self
+                        .get_child_text(&child, "name", source)
+                        .unwrap_or_else(|| "variant".to_string());
+                    
+                    let variant_type = child.utf8_text(source.as_bytes())?.to_string();
+
+                    properties.push(TypeProperty {
+                        name: variant_name,
+                        type_annotation: variant_type,
+                        is_optional: false,
+                        description: None,
+                    });
+                }
+            }
+        }
+
+        Ok(Some(TypeDefinition {
+            name,
+            kind: TypeKind::Enum,
+            definition: node.utf8_text(source.as_bytes())?.to_string(),
+            properties,
+            generic_params,
+            range: self.get_range(node),
+        }))
+    }
+
+    fn extract_type_alias(&self, node: &Node, source: &str) -> Result<Option<TypeDefinition>> {
+        let name = self
+            .get_child_text(node, "type_identifier", source)
+            .unwrap_or_else(|| "Anonymous".to_string());
+        
+        let mut generic_params = Vec::new();
+
+        // Extract generic parameters
+        if let Some(type_params) = node.child_by_field_name("type_parameters") {
+            generic_params = self.extract_generic_params(&type_params, source)?;
+        }
+
+        Ok(Some(TypeDefinition {
+            name,
+            kind: TypeKind::TypeAlias,
+            definition: node.utf8_text(source.as_bytes())?.to_string(),
+            properties: vec![],
+            generic_params,
+            range: self.get_range(node),
+        }))
+    }
+
+    fn extract_trait_type_def(&self, node: &Node, source: &str) -> Result<Option<TypeDefinition>> {
+        let name = self
+            .get_child_text(node, "type_identifier", source)
+            .unwrap_or_else(|| "Anonymous".to_string());
+        
+        let mut properties = Vec::new();
+        let mut generic_params = Vec::new();
+
+        // Extract generic parameters
+        if let Some(type_params) = node.child_by_field_name("type_parameters") {
+            generic_params = self.extract_generic_params(&type_params, source)?;
+        }
+
+        // Extract trait methods and associated types
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.children(&mut cursor) {
+                match child.kind() {
+                    "function_signature_item" => {
+                        let method_name = self
+                            .get_child_text(&child, "name", source)
+                            .unwrap_or_else(|| "fn".to_string());
+                        
+                        let signature = child.utf8_text(source.as_bytes())?.to_string();
+
+                        properties.push(TypeProperty {
+                            name: method_name,
+                            type_annotation: signature,
+                            is_optional: false,
+                            description: None,
+                        });
+                    }
+                    "associated_type" => {
+                        let type_name = self
+                            .get_child_text(&child, "type_identifier", source)
+                            .unwrap_or_else(|| "AssociatedType".to_string());
+                        
+                        properties.push(TypeProperty {
+                            name: type_name,
+                            type_annotation: "type".to_string(),
+                            is_optional: false,
+                            description: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(Some(TypeDefinition {
+            name,
+            kind: TypeKind::Interface, // Traits are like interfaces
+            definition: node.utf8_text(source.as_bytes())?.to_string(),
+            properties,
+            generic_params,
+            range: self.get_range(node),
+        }))
+    }
+
+    fn extract_constants(&self, node: &Node, source: &str) -> Result<Vec<Constant>> {
+        let mut constants = Vec::new();
+        let mut cursor = node.walk();
+
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "const_item" => {
+                    let name = self
+                        .get_child_text(&child, "identifier", source)
+                        .unwrap_or_else(|| "CONST".to_string());
+                    
+                    let type_annotation = child
+                        .child_by_field_name("type")
+                        .map(|n| n.utf8_text(source.as_bytes()).unwrap().to_string());
+                    
+                    let value = child
+                        .child_by_field_name("value")
+                        .map(|n| n.utf8_text(source.as_bytes()).unwrap().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    constants.push(Constant {
+                        name,
+                        value,
+                        type_annotation,
+                        category: ConstantCategory::Other,
+                        range: self.get_range(&child),
+                    });
+                }
+                "static_item" => {
+                    let name = self
+                        .get_child_text(&child, "identifier", source)
+                        .unwrap_or_else(|| "STATIC".to_string());
+                    
+                    let type_annotation = child
+                        .child_by_field_name("type")
+                        .map(|n| n.utf8_text(source.as_bytes()).unwrap().to_string());
+                    
+                    let value = child
+                        .child_by_field_name("value")
+                        .map(|n| n.utf8_text(source.as_bytes()).unwrap().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    constants.push(Constant {
+                        name,
+                        value,
+                        type_annotation,
+                        category: ConstantCategory::Config,
+                        range: self.get_range(&child),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(constants)
     }
 }
 

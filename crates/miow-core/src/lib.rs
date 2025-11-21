@@ -5,10 +5,14 @@ use std::path::PathBuf;
 pub mod indexer;
 pub mod types;
 pub mod project_signature;
+pub mod intelligent_detector;
+pub mod language_registry;
 
 pub use indexer::CodebaseIndexer;
 pub use types::*;
 pub use project_signature::ProjectSignature;
+pub use intelligent_detector::IntelligentSignatureDetector;
+pub use language_registry::{LanguageRegistry, LanguageConfig};
 
 /// Main entry point for indexing a codebase
 pub async fn index_codebase(path: PathBuf) -> Result<IndexReport> {

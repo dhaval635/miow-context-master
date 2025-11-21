@@ -526,3 +526,145 @@ body {
 .close-btn:hover {
   background: #c82333;
 }
+
+/* Agent State Section */
+.agent-state-container {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 16px;
+  padding: 2rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  border: 2px solid #667eea;
+}
+
+.agent-state-container h3 {
+  color: #667eea;
+  margin-bottom: 1.5rem;
+  font-size: 1.4rem;
+}
+
+.stream-status {
+  margin-bottom: 1.5rem;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.75rem 1.5rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-radius: 25px;
+  font-weight: 600;
+  font-size: 1rem;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+}
+
+.agent-events {
+  margin-top: 1.5rem;
+}
+
+.agent-events h4 {
+  color: #333;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+}
+
+.events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 500px;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+
+.event {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  padding: 1rem;
+  transition: all 0.2s ease;
+}
+
+.event:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.event-step {
+  border-left: 4px solid #667eea;
+}
+
+.event-thought {
+  border-left: 4px solid #17a2b8;
+}
+
+.event-toolcall {
+  border-left: 4px solid #ffc107;
+}
+
+.event-tooloutput {
+  border-left: 4px solid #28a745;
+}
+
+.event-error {
+  border-left: 4px solid #dc3545;
+  background: #fff5f5;
+}
+
+.event-done {
+  border-left: 4px solid #28a745;
+  background: #f0fff4;
+}
+
+.event-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.event-type {
+  font-weight: 600;
+  color: #333;
+  font-size: 0.95rem;
+}
+
+.event-meta {
+  font-size: 0.85rem;
+  color: #666;
+  background: white;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+}
+
+.event-content {
+  color: #555;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.event-content pre {
+  background: white;
+  border: 1px solid #e9ecef;
+  border-radius: 4px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+}
+
+.events-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.events-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+.events-list::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+.events-list::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}

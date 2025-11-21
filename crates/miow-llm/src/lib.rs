@@ -6,10 +6,12 @@ use serde_json::Value;
 mod gemini;
 mod openai;
 pub mod question_loop;
+pub mod cache;
 
 pub use gemini::GeminiClient;
 pub use openai::OpenAIClient;
 pub use question_loop::*;
+pub use cache::LLMCache;
 
 /// LLM provider trait
 #[async_trait]
@@ -202,4 +204,8 @@ pub struct ContextItem {
     pub content: String,
     pub file_path: String,
     pub relevance_score: f32,
+    #[serde(default)]
+    pub props: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }

@@ -162,6 +162,8 @@ impl MetaPromptGenerator {
 > 3. **USE DESIGN TOKENS**: Use the exact color values, spacing, and design tokens defined below. Do NOT use arbitrary values.
 > 4. **IMPORT CORRECTLY**: Use the exact import paths shown for each component/utility.
 > 5. **TYPE SAFETY**: Use the existing type definitions. Do NOT create duplicate types.
+> 6. **NO HALLUCINATIONS**: Do NOT invent new helper functions or components that are not in the context.
+> 7. **CONSISTENCY**: Ensure your code is indistinguishable from the existing codebase.
 
 "#.to_string()
     }
@@ -461,14 +463,28 @@ impl MetaPromptGenerator {
         content
     }
     
-    fn format_symbol(symbol: &SymbolInfo, index: usize) -> String {
-        format!(
+    pub(crate) fn format_symbol(symbol: &SymbolInfo, index: usize) -> String {
+        let mut info = format!(
             "#### {}. `{}` ({})\n\
-            **File**: `{}`\n\
-            **Import**: See file path above\n\n\
-            ```\n{}\n```\n\n",
-            index, symbol.name, symbol.kind, symbol.file_path, symbol.content
-        )
+            **File**: `{}`\n",
+            index, symbol.name, symbol.kind, symbol.file_path
+        );
+
+        if !symbol.props.is_empty() {
+            info.push_str(&format!("**Props**: {}\n", symbol.props.join(", ")));
+        }
+
+        if !symbol.references.is_empty() {
+            // Limit references to avoid noise
+            let refs: Vec<_> = symbol.references.iter().take(10).collect();
+            info.push_str(&format!("**References**: {}\n", refs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            if symbol.references.len() > 10 {
+                info.push_str("... (more)\n");
+            }
+        }
+
+        info.push_str(&format!("\n```\n{}\n```\n\n", symbol.content));
+        info
     }
     
     fn format_type(type_info: &TypeInfo, index: usize) -> String {
@@ -651,5 +667,27 @@ mod tests {
         
         assert!(prompt.contains("# TASK"));
         assert!(prompt.contains("CONSTRAINTS"));
+    }
+
+    #[test]
+    fn test_format_symbol_with_metadata() {
+        let symbol = SymbolInfo {
+            name: "TestComponent".to_string(),
+            kind: "component".to_string(),
+            content: "function TestComponent() {}".to_string(),
+            file_path: "src/components/TestComponent.tsx".to_string(),
+            start_line: 1,
+            end_line: 1,
+            props: vec!["title: string".to_string(), "isActive: boolean".to_string()],
+            references: vec!["Button".to_string(), "useState".to_string()],
+        };
+
+        let formatted = format_symbol(&symbol, 1);
+        
+        assert!(formatted.contains("#### 1. `TestComponent` (component)"));
+        assert!(formatted.contains("**File**: `src/components/TestComponent.tsx`"));
+        assert!(formatted.contains("**Props**: title: string, isActive: boolean"));
+        assert!(formatted.contains("**References**: Button, useState"));
+        assert!(formatted.contains("```\nfunction TestComponent() {}\n```"));
     }
 }

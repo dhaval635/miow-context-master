@@ -16,3 +16,4 @@ tracing = { workspace = true }
 
 miow-vector = { path = "../miow-vector" }
 miow-parsers = { path = "../miow-parsers" }
+miow-llm = { path = "../miow-llm" }
