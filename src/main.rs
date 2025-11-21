@@ -51,6 +51,21 @@ struct HealthResponse {
 
 #[cfg(feature = "web")]
 #[derive(Deserialize)]
+struct SearchFilesRequest {
+    codebase_path: String,
+    query: String,
+}
+
+#[cfg(feature = "web")]
+#[derive(Serialize)]
+struct SearchFilesResponse {
+    success: bool,
+    files: Option<Vec<String>>,
+    error: Option<String>,
+}
+
+#[cfg(feature = "web")]
+#[derive(Deserialize)]
 struct DebugRequest {
     codebase_path: String,
 }
@@ -104,7 +119,10 @@ use axum::{
     Json,
     extract::State,
     http::StatusCode,
+    response::sse::{Event, Sse},
 };
+use futures::stream::{self, Stream};
+use std::convert::Infallible;
 #[cfg(feature = "web")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "web")]
@@ -627,7 +645,11 @@ async fn handle_generate_autonomous(
     println!();
 
     // Generate context-aware prompt using Universal Knowledge Graph workflow
-    let generated_prompt = orchestrator.generate_enhanced_prompt(&prompt, &path).await?;
+    let generated_prompt = orchestrator.generate_autonomous_prompt(
+        path.to_str().unwrap(),
+        &prompt,
+        None // No event streaming for CLI
+    ).await?;
 
     println!("{}", "✅ Context-aware prompt generated!".green().bold());
     println!();
@@ -828,6 +850,7 @@ async fn start_web_server(port: u16, _db_path: PathBuf) -> Result<()> {
     // Create router
     let app = Router::new()
         .route("/api/generate", post(generate_handler))
+        .route("/api/generate-stream", post(generate_stream_handler))
         .route("/api/generate-with-files", post(generate_with_files_handler))
         .route("/api/files", post(files_handler))
         .route("/api/debug/signature", post(debug_signature_handler))
@@ -909,7 +932,11 @@ async fn generate_handler(
                 orchestrator = orchestrator.with_vector_store(std::sync::Arc::new(store));
             }
             
-            match orchestrator.generate_enhanced_prompt(&request.user_prompt, &codebase_path).await {
+            match orchestrator.generate_autonomous_prompt(
+                codebase_path.to_str().unwrap(),
+                &request.user_prompt,
+                None // No event streaming for now
+            ).await {
                 Ok(result) => {
                     println!("✅ Request completed successfully");
                     Ok(Json(GenerateResponse {
@@ -936,6 +963,202 @@ async fn generate_handler(
             }))
         }
     }
+}
+
+#[cfg(feature = "web")]
+async fn generate_stream_handler(
+    State(state): State<AppState>,
+    Json(request): Json<GenerateRequest>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let codebase_path = PathBuf::from(&request.codebase_path);
+    let user_prompt = request.user_prompt.clone();
+    let llm = state.llm.clone();
+    
+    
+    // Create channel for communication
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(100);
+    
+    // Spawn background task to handle streaming
+    tokio::spawn(async move {
+        // Send initial status
+        let _ = tx.send(Ok(Event::default()
+            .event("status")
+            .data("Starting autonomous agent..."))).await;
+        
+        // Determine project-specific DB path
+        let db_path = codebase_path.join(".miow").join("miow.db");
+        let db_dir = db_path.parent().unwrap();
+        
+        // Create .miow directory if it doesn't exist
+        if !db_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(db_dir) {
+                let _ = tx.send(Ok(Event::default()
+                    .event("error")
+                    .data(format!("Failed to create .miow directory: {}", e)))).await;
+                return;
+            }
+        }
+
+        // Auto-index if DB doesn't exist
+        if !db_path.exists() {
+            let _ = tx.send(Ok(Event::default()
+                .event("status")
+                .data("No index found. Indexing codebase..."))).await;
+            
+            match handle_index(codebase_path.clone(), db_path.clone()).await {
+                Ok(_) => {
+                    let _ = tx.send(Ok(Event::default()
+                        .event("status")
+                        .data("Indexing completed successfully"))).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Ok(Event::default()
+                        .event("error")
+                        .data(format!("Indexing failed: {}", e)))).await;
+                    return;
+                }
+            }
+        }
+
+        // Initialize orchestrator
+        let orchestrator = match MiowOrchestrator::new(db_path.to_str().unwrap()) {
+            Ok(mut orch) => {
+                // Inject shared LLM
+                if let Some(llm_ref) = &llm {
+                    orch = orch.with_llm_arc(llm_ref.clone());
+                }
+
+                // Attach vector store
+                let qdrant_url = std::env::var("QDRANT_URL")
+                    .unwrap_or_else(|_| "http://localhost:6333".to_string());
+                let collection_name = collection_name_for_path(&codebase_path);
+                if let Ok(store) = miow_vector::VectorStore::new(&qdrant_url, &collection_name).await {
+                    orch = orch.with_vector_store(std::sync::Arc::new(store));
+                }
+                
+                orch
+            }
+            Err(e) => {
+                let _ = tx.send(Ok(Event::default()
+                    .event("error")
+                    .data(format!("Failed to initialize orchestrator: {}", e)))).await;
+                return;
+            }
+        };
+
+        // Create channel for agent events
+        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(100);
+        
+        // Spawn agent task
+        let agent_task = tokio::spawn(async move {
+            orchestrator.generate_autonomous_prompt(
+                codebase_path.to_str().unwrap(),
+                &user_prompt,
+                Some(agent_tx)
+            ).await
+        });
+
+        // Forward agent events
+        while let Some(event) = agent_rx.recv().await {
+            let event_json = serde_json::to_string(&event).unwrap_or_default();
+            let _ = tx.send(Ok(Event::default()
+                .event("agent")
+                .data(event_json))).await;
+        }
+
+        // Wait for final result
+        match agent_task.await {
+            Ok(Ok(result)) => {
+                let _ = tx.send(Ok(Event::default()
+                    .event("result")
+                    .data(result))).await;
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(Ok(Event::default()
+                    .event("error")
+                    .data(format!("Agent error: {}", e)))).await;
+            }
+            Err(e) => {
+                let _ = tx.send(Ok(Event::default()
+                    .event("error")
+                    .data(format!("Task error: {}", e)))).await;
+            }
+        }
+    });
+
+    // Create stream from receiver
+    let event_stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    });
+
+    Sse::new(event_stream)
+}
+
+#[cfg(feature = "web")]
+async fn search_files_handler(
+    Json(request): Json<SearchFilesRequest>,
+) -> Json<SearchFilesResponse> {
+    use walkdir::WalkDir;
+    
+    let codebase_path = PathBuf::from(&request.codebase_path);
+    let query = request.query.to_lowercase();
+    
+    if !codebase_path.exists() {
+        return Json(SearchFilesResponse {
+            success: false,
+            files: None,
+            error: Some("Codebase path does not exist".to_string()),
+        });
+    }
+    
+    let mut matching_files = Vec::new();
+    
+    // Walk the directory and find matching files
+    for entry in WalkDir::new(&codebase_path)
+        .max_depth(10)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            let path = entry.path();
+            
+            // Skip hidden files and common ignore patterns
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.starts_with('.') || 
+                   path.to_str().map(|s| s.contains("/node_modules/") || 
+                                          s.contains("/target/") ||
+                                          s.contains("/.git/") ||
+                                          s.contains("/dist/") ||
+                                          s.contains("/build/")).unwrap_or(false) {
+                    continue;
+                }
+            }
+            
+            // Check if path matches query
+            if let Some(path_str) = path.to_str() {
+                if path_str.to_lowercase().contains(&query) {
+                    // Make path relative to codebase
+                    if let Ok(relative) = path.strip_prefix(&codebase_path) {
+                        if let Some(rel_str) = relative.to_str() {
+                            matching_files.push(rel_str.to_string());
+                        }
+                    }
+                }
+            }
+            
+            // Limit results to 50
+            if matching_files.len() >= 50 {
+                break;
+            }
+        }
+    }
+    
+    Json(SearchFilesResponse {
+        success: true,
+        files: Some(matching_files),
+        error: None,
+    })
 }
 
 #[cfg(feature = "web")]

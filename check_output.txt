@@ -1,0 +1,228 @@
+warning: unused import: `anyhow::Result`
+ --> crates/miow-graph/src/query.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Context`
+ --> crates/miow-graph/src/lib.rs:1:14
+  |
+1 | ...::{Context, R...
+  |       ^^^^^^^
+
+warning: `miow-graph` (lib) generated 2 warnings (run `cargo fix --lib -p miow-graph` to apply 1 suggestion)
+warning: unused import: `serde_json::Value`
+ --> crates/miow-llm/src/lib.rs:4:5
+  |
+4 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `SymbolSearchResult as VectorResult`
+ --> crates/miow-llm/src/question_loop.rs:3:32
+  |
+3 | ...e, SymbolSearchResult as VectorResult};
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Message` and `Role`
+ --> crates/miow-llm/src/question_loop.rs:8:26
+  |
+8 | ...r, Message, Role};
+  |       ^^^^^^^  ^^^^
+
+warning: `miow-llm` (lib) generated 3 warnings (run `cargo fix --lib -p miow-llm` to apply 3 suggestions)
+warning: unused imports: `Deserialize` and `Serialize`
+ --> crates/miow-parsers/src/lib.rs:2:13
+  |
+2 | ...::{Deserialize, Serialize};
+  |       ^^^^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `QueryCursor` and `Query`
+ --> crates/miow-parsers/src/python.rs:3:33
+  |
+3 | ...r, Query, QueryCursor};
+  |       ^^^^^  ^^^^^^^^^^^
+
+warning: unused imports: `QueryCursor` and `Query`
+ --> crates/miow-parsers/src/rust.rs:3:33
+  |
+3 | ...r, Query, QueryCursor};
+  |       ^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> crates/miow-parsers/src/types.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/miow-parsers/src/typescript.rs:11:13
+   |
+11 | ...et mut parser = ...
+   |       ----^^^^^^
+   |       |
+   |       help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: unused variable: `node`
+   --> crates/miow-parsers/src/typescript.rs:185:49
+    |
+185 | ...f, node: &...
+    |       ^^^^ help: if this is intentional, prefix it with an underscore: `_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `node`
+   --> crates/miow-parsers/src/typescript.rs:543:31
+    |
+543 | ...f, node: &...
+    |       ^^^^ help: if this is intentional, prefix it with an underscore: `_node`
+
+warning: unused variable: `source`
+   --> crates/miow-parsers/src/typescript.rs:543:44
+    |
+543 | ...e, source: &...
+    |       ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+
+warning: variable does not need to be mutable
+   --> crates/miow-parsers/src/typescript.rs:544:13
+    |
+544 | ...et mut exports = ...
+    |       ----^^^^^^^
+    |       |
+    |       help: remove this `mut`
+
+warning: field `parser` is never read
+ --> crates/miow-parsers/src/python.rs:6:5
+  |
+5 | pub struct PythonParser {
+  |            ------------ field in this struct
+6 |     parser: Parser,
+  |     ^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: field `parser` is never read
+ --> crates/miow-parsers/src/rust.rs:6:5
+  |
+5 | pub struct RustParser {
+  |            ---------- field in this struct
+6 |     parser: Parser,
+  |     ^^^^^^
+
+warning: field `parser` is never read
+ --> crates/miow-parsers/src/typescript.rs:6:5
+  |
+5 | pub struct TypeScriptParser {
+  |            ---------------- field in this struct
+6 |     parser: Parser,
+  |     ^^^^^^
+
+warning: `miow-parsers` (lib) generated 12 warnings (run `cargo fix --lib -p miow-parsers` to apply 6 suggestions)
+warning: unused imports: `Deserialize` and `Serialize`
+ --> crates/miow-core/src/lib.rs:2:13
+  |
+2 | ...::{Deserialize, Serialize};
+  |       ^^^^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: method `should_ignore` is never used
+   --> crates/miow-core/src/indexer.rs:306:8
+    |
+24  | impl CodebaseIndexer {
+    | -------------------- method in this implementation
+...
+306 |     fn should_ignore(&s...
+    |        ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated functions `detect_ui_library`, `detect_validation_library`, `detect_auth_library`, and `scan_for_component_usage` are never used
+   --> crates/miow-core/src/project_signature.rs:191:8
+    |
+21  | impl ProjectSignature {
+    | --------------------- associated functions in this implementation
+...
+191 |     fn detect_ui_library(root_path:...
+    |        ^^^^^^^^^^^^^^^^^
+...
+221 |     fn detect_validation_library(de...
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+239 |     fn detect_auth_library(dependen...
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+332 |     fn scan_for_component_usage(roo...
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `miow-core` (lib) generated 3 warnings (run `cargo fix --lib -p miow-core` to apply 1 suggestion)
+    Checking miow-agent v0.1.0 (/home/dhaval/Desktop/dhaval/vc/miow-context-master/crates/miow-agent)
+error[E0432]: unresolved import `tracing`
+ --> crates/miow-agent/src/autonomous.rs:7:5
+  |
+7 | use tracing::{info, debug};
+  |     ^^^^^^^ use of unresolved module or unlinked crate `tracing`
+  |
+  = help: if you wanted to use a crate named `tracing`, use `cargo add tracing` to add it to your `Cargo.toml`
+
+warning: unused import: `serde_json::json`
+ --> crates/miow-agent/src/router.rs:7:5
+  |
+7 | use serde_json::json;
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `SpecializedPrompt`
+ --> crates/miow-agent/src/workers.rs:1:26
+  |
+1 | use crate::{SearchQuery, SpecializedPrompt, PromptRegistry};
+  |                          ^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `anyhow::Error: serde::Deserialize<'de>` is not satisfied
+    --> crates/miow-agent/src/autonomous.rs:211:9
+     |
+211  |         serde_json::from_str(&clean).unwrap_or_else(|_| Ok(RelevanceResult {
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `anyhow::Error`
+     |
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `anyhow::Error` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               &'a Path
+               &'a [u8]
+               &'a serde_json::value::RawValue
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+             and 221 others
+     = note: required for `Result<RelevanceResult, anyhow::Error>` to implement `Deserialize<'_>`
+note: required by a bound in `serde_json::from_str`
+    --> /home/dhaval/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.145/src/de.rs:2699:8
+     |
+2697 | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+     |        -------- required by a bound in this function
+2698 | where
+2699 |     T: de::Deserialize<'a>,
+     |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+warning: unused variable: `query_list`
+  --> crates/miow-agent/src/workers.rs:70:13
+   |
+70 |         let query_list = search_queries.iter()
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_list`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+Some errors have detailed explanations: E0277, E0432.
+For more information about an error, try `rustc --explain E0277`.
+warning: `miow-agent` (lib) generated 3 warnings
+error: could not compile `miow-agent` (lib) due to 2 previous errors; 3 warnings emitted

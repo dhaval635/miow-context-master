@@ -1213,9 +1213,13 @@ dependencies = [
  "async-trait",
  "miow-common",
  "miow-core",
+ "miow-graph",
  "miow-llm",
+ "miow-vector",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

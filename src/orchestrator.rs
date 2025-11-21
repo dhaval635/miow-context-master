@@ -3,7 +3,7 @@ use miow_analyzer::ContextAnalyzer;
 use miow_core::ProjectSignature;
 use miow_graph::KnowledgeGraph;
 use miow_llm::{ContextItem, GatheredContext, LLMProvider, Message, Role};
-use miow_agent::{GeminiRouterAgent, GeminiContextAuditor, GeminiWorkerAgent, RouterAgent, SearchPlan, WorkerAgent};
+use miow_agent::{GeminiRouterAgent, GeminiContextAuditor, GeminiWorkerAgent, RouterAgent, SearchPlan, WorkerAgent, AutonomousAgent};
 use miow_prompt::{
     ConstantInfo, ContextData, DesignTokenInfo, PromptGenerator, PromptRequest, SchemaInfo,
     SymbolInfo, TypeInfo,
@@ -533,6 +533,162 @@ Respond with a JSON array of strings."#,
         info!("✅ Universal Knowledge Graph workflow complete!");
 
         Ok(prompt)
+    }
+
+    /// Generate a context-aware prompt using the Autonomous Agent Loop
+    pub async fn generate_autonomous_prompt(
+        &self,
+        project_root: &str,
+        user_prompt: &str,
+        event_tx: Option<tokio::sync::mpsc::Sender<miow_agent::autonomous::AgentEvent>>,
+    ) -> Result<String> {
+        info!("🤖 Starting Autonomous Context Generation for: {}", project_root);
+
+        // 1. Detect Project Signature (LLM-driven)
+        let signature = self.detect_signature_with_llm(std::path::Path::new(project_root)).await?;
+        info!("📊 Detected Project Signature: {:?}", signature);
+
+        // 2. Initialize Autonomous Agent
+        let llm = self.llm.clone().ok_or_else(|| anyhow::anyhow!("LLM required for autonomous mode"))?;
+        let agent = AutonomousAgent::new(
+            llm,
+            self.graph.clone(),
+            self.vector_store.clone(),
+        );
+
+        // 3. Run Agent Loop (Gather Context)
+        let agent_context = agent.run(user_prompt, event_tx).await?;
+        info!("✅ Agent finished gathering context. Items: {}", agent_context.gathered_info.len());
+
+        // 4. Generate Implementation Plan (LLM-driven)
+        let plan = self.generate_implementation_plan_with_llm(
+            user_prompt, 
+            &agent_context, 
+            &signature.to_description()
+        ).await?;
+        
+        // 5. Prepare Context Data for Meta-Prompt
+        let mut context_data = ContextData {
+            relevant_symbols: Vec::new(),
+            similar_symbols: Vec::new(),
+            types: Vec::new(),
+            design_tokens: Vec::new(),
+            constants: Vec::new(),
+            schemas: Vec::new(),
+            common_imports: Vec::new(),
+        };
+        
+        // Add gathered info
+        for info in agent_context.gathered_info {
+            context_data.relevant_symbols.push(SymbolInfo {
+                name: "ContextItem".to_string(),
+                kind: "snippet".to_string(),
+                file_path: info.source,
+                content: info.content,
+                start_line: 0,
+                end_line: 0,
+            });
+        }
+
+        // Add the Plan as a special context item
+        context_data.relevant_symbols.push(SymbolInfo {
+            name: "ImplementationPlan".to_string(),
+            kind: "plan".to_string(),
+            file_path: "implementation_plan.md".to_string(),
+            content: plan,
+            start_line: 0,
+            end_line: 0,
+        });
+
+        let config = miow_prompt::MetaPromptConfig::default();
+        let prompt = miow_prompt::MetaPromptGenerator::generate(
+            user_prompt,
+            &context_data,
+            Some(&signature.to_description()),
+            config,
+        )?;
+
+        Ok(prompt)
+    }
+
+    async fn detect_signature_with_llm(&self, project_root: &std::path::Path) -> Result<miow_core::ProjectSignature> {
+        // List top-level files to give LLM a hint
+        let mut file_list = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(project_root) {
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    file_list.push(name);
+                }
+            }
+        }
+        let files_str = file_list.join(", ");
+
+        let prompt = format!(
+            r#"Analyze the following file list from a project root and determine the technology stack.
+            Files: {}
+            
+            Respond with JSON ONLY:
+            {{
+                "language": "Rust/TypeScript/Python/etc",
+                "framework": "React/Axum/Django/etc",
+                "package_manager": "npm/cargo/pip/etc",
+                "ui_library": "Tailwind/MaterialUI/etc (or None)",
+                "validation_library": "zod/serde/etc (or None)",
+                "auth_library": "auth.js/etc (or None)",
+                "description": "Short description of the stack"
+            }}
+            "#,
+            files_str
+        );
+
+        let llm = self.llm.as_ref().ok_or_else(|| anyhow::anyhow!("LLM required"))?;
+        let response = llm.generate(&prompt).await?;
+        
+        // Clean and parse JSON
+        let clean = response.content.trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let signature: miow_core::ProjectSignature = serde_json::from_str(clean)
+            .unwrap_or_else(|_| miow_core::ProjectSignature::default());
+            
+        Ok(signature)
+    }
+
+    async fn generate_implementation_plan_with_llm(
+        &self, 
+        task: &str, 
+        context: &miow_agent::autonomous::AgentContext,
+        project_info: &str
+    ) -> Result<String> {
+        let gathered_summary = context.gathered_info.iter()
+            .map(|i| format!("- From {}: {}", i.source, i.relevance))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            r#"Create a comprehensive implementation plan for the following task.
+            
+            Task: {}
+            Project Context: {}
+            
+            Gathered Information:
+            {}
+            
+            Generate a detailed Markdown plan with:
+            1. Goal Description
+            2. Proposed Changes (File by File)
+            3. Verification Plan
+            "#,
+            task, project_info, gathered_summary
+        );
+
+        let llm = self.llm.as_ref().ok_or_else(|| anyhow::anyhow!("LLM required"))?;
+        let response = llm.generate(&prompt).await?;
+        
+        Ok(response.content)
     }
 
     /// Gather comprehensive context from codebase

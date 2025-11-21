@@ -1,4 +1,4 @@
-use crate::{LLMConfig, LLMProvider, LLMResponse, Message, Role};
+use crate::{LLMConfig, LLMProvider, LLMResponse, Message, Role, LLMCache};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -13,6 +13,7 @@ pub struct GeminiClient {
     client: reqwest::Client,
     max_retries: u32,
     base_delay: Duration,
+    cache: LLMCache,
 }
 
 impl GeminiClient {
@@ -26,8 +27,9 @@ impl GeminiClient {
             model: config.model,
             temperature: config.temperature,
             client: reqwest::Client::new(),
-            max_retries: 5, // Increased from 3 to 5
-            base_delay: Duration::from_secs(2), // Increased base delay
+            max_retries: 5,
+            base_delay: Duration::from_secs(2),
+            cache: LLMCache::new(),
         })
     }
 
@@ -42,9 +44,8 @@ impl GeminiClient {
     }
 
     fn generate_jitter(&self) -> Duration {
-        // Simple pseudo-random jitter based on current time (Send-safe, no RNG crate needed)
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        let seed = now.as_nanos() as u64 % 1000; // 0-999 ms
+        let seed = now.as_nanos() as u64 % 1000;
         Duration::from_millis(seed)
     }
 
@@ -56,11 +57,10 @@ impl GeminiClient {
 
         debug!("Calling Gemini API with model: {}", self.model);
 
-        // Convert messages to Gemini format
         let mut contents = Vec::new();
         for message in messages {
             let role = match message.role {
-                Role::System => "model", // Gemini uses "model" for system messages
+                Role::System => "model",
                 Role::User => "user",
                 Role::Assistant => "model",
             };
@@ -82,12 +82,11 @@ impl GeminiClient {
             }
         });
 
-        // Retry loop with exponential backoff and jitter
         let mut attempt = 0;
 
         while attempt <= self.max_retries {
             let start_time = Instant::now();
-            let jitter = self.generate_jitter(); // Generate jitter per attempt (Send-safe)
+            let jitter = self.generate_jitter();
 
             match self.perform_api_call(&url, &request_body).await {
                 Ok(response_text) => {
@@ -103,7 +102,6 @@ impl GeminiClient {
                         return Err(e);
                     }
 
-                    // Exponential backoff: base_delay * 2^(attempt-1)
                     let backoff_delay = self.base_delay * 2u32.pow(attempt - 1);
                     let total_delay = backoff_delay + jitter;
 
@@ -113,7 +111,6 @@ impl GeminiClient {
             }
         }
 
-        // This should not be reached, but to satisfy compiler
         anyhow::bail!("Unexpected error after retries")
     }
 
@@ -129,9 +126,9 @@ impl GeminiClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            // Check for retryable errors (5xx, etc.)
-            if status.is_server_error() {
-                anyhow::bail!("Gemini API server error ({}): {}. This is retryable.", status, error_text);
+            
+            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                anyhow::bail!("Gemini API error ({}): {}. This is retryable.", status, error_text);
             } else {
                 anyhow::bail!("Gemini API error ({}): {}", status, error_text);
             }
@@ -142,7 +139,6 @@ impl GeminiClient {
             .await
             .context("Failed to parse Gemini API response")?;
 
-        // Extract text from response
         let text = response_json["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .context("Failed to extract text from Gemini response")?
@@ -155,6 +151,16 @@ impl GeminiClient {
 #[async_trait]
 impl LLMProvider for GeminiClient {
     async fn generate(&self, prompt: &str) -> Result<LLMResponse> {
+        // Check cache first
+        if let Some(cached) = self.cache.get(prompt, &self.model).await {
+            info!("Returning cached response for prompt");
+            return Ok(LLMResponse {
+                content: cached,
+                finish_reason: None,
+                usage: None,
+            });
+        }
+
         info!("Generating response with Gemini");
 
         let messages = vec![Message {
@@ -164,10 +170,15 @@ impl LLMProvider for GeminiClient {
 
         let text = self.call_api(messages).await?;
 
+        // Cache the result
+        if let Err(e) = self.cache.set(prompt, &self.model, &text).await {
+            warn!("Failed to cache response: {}", e);
+        }
+
         Ok(LLMResponse {
             content: text,
             finish_reason: None,
-            usage: None, // Gemini doesn't provide token count in basic response
+            usage: None,
         })
     }
 

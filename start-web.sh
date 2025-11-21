@@ -2,6 +2,7 @@
 
 # MIOW-Context Web UI Launcher
 # Starts both backend and frontend servers
+export GEMINI_API_KEY="AIzaSyCjSvRD91M3GZmIK2qHEFu6IqbrdleC1wU"
 
 set -e
 
@@ -41,11 +42,25 @@ cargo run --features web -- serve --port 3001 &
 backend_pid=$!
 
 # Wait a moment for backend to start
-sleep 3
+# Wait for backend to start (up to 60 seconds)
+echo "⏳ Waiting for backend to start..."
+max_retries=60
+counter=0
+backend_ready=false
 
-# Check if backend started successfully
-if ! curl -s http://localhost:3001/api/health > /dev/null 2>&1; then
-    echo "❌ Backend failed to start"
+while [ $counter -lt $max_retries ]; do
+    if curl -s http://localhost:3001/api/health > /dev/null 2>&1; then
+        backend_ready=true
+        break
+    fi
+    sleep 1
+    counter=$((counter+1))
+    echo -n "."
+done
+echo ""
+
+if [ "$backend_ready" = false ]; then
+    echo "❌ Backend failed to start after $max_retries seconds"
     kill $backend_pid 2>/dev/null || true
     exit 1
 fi

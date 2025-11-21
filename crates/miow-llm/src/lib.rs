@@ -6,10 +6,12 @@ use serde_json::Value;
 mod gemini;
 mod openai;
 pub mod question_loop;
+pub mod cache;
 
 pub use gemini::GeminiClient;
 pub use openai::OpenAIClient;
 pub use question_loop::*;
+pub use cache::LLMCache;
 
 /// LLM provider trait
 #[async_trait]
